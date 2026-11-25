@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Orbis — gesture particle sphere</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<style>
+:root{--ink:#e9e6df;--dim:rgba(233,230,223,.45);--line:rgba(233,230,223,.16)}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;color:var(--ink);background:#05060a;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+body{background:radial-gradient(ellipse at 50% 45%,#0e1118 0%,#05060a 72%)}
+
+#cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1);
+  opacity:0;transition:opacity .6s;filter:brightness(.7) saturate(.8);z-index:0;pointer-events:none}
+#cam.on{opacity:.6}
+#stage{position:fixed;inset:0;width:100%;height:100%;display:block;z-index:1}
+.ui{position:fixed;z-index:2}
+
+#title{top:28px;left:32px;pointer-events:none}
+h1{font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,"Times New Roman",serif;
+  font-weight:400;font-style:italic;font-size:36px;letter-spacing:.01em;line-height:1}
+#status{margin-top:12px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);
+  display:flex;align-items:center;gap:9px}
+#dot{width:6px;height:6px;border-radius:50%;background:#555;transition:.3s}
+#dot.live{background:#6ee7b7;box-shadow:0 0 9px #6ee7b7}
+
+#toggle{top:30px;right:32px;display:flex;align-items:center;gap:10px;padding:9px 16px;border-radius:999px;
+  border:1px solid var(--line);background:rgba(10,12,18,.45);backdrop-filter:blur(8px);color:var(--ink);
+  font:inherit;font-size:11px;letter-spacing:.12em;text-transform:uppercase;cursor:pointer;transition:.25s}
+#toggle:hover:not(:disabled){border-color:rgba(233,230,223,.4)}
+#toggle:disabled{opacity:.35;cursor:default}
+#toggle i{width:24px;height:12px;border-radius:12px;background:rgba(255,255,255,.15);position:relative;transition:.25s}
+#toggle i::after{content:"";position:absolute;top:2px;left:2px;width:8px;height:8px;border-radius:50%;
+  background:var(--ink);transition:.25s}
+#toggle.active i{background:rgba(110,231,183,.5)}
+#toggle.active i::after{left:14px}
+
+#legend{left:32px;bottom:28px;font-size:11px;line-height:1.9;letter-spacing:.06em;color:var(--dim);pointer-events:none}
+#legend b{font-weight:500;color:rgba(233,230,223,.75)}
+
+#swatches{right:32px;bottom:30px;display:flex;gap:12px;align-items:center;pointer-events:none}
+.sw{display:flex;flex-direction:column;align-items:center;gap:6px;font-size:10px;color:var(--dim);transition:.3s}
+.sw span{width:9px;height:9px;border-radius:50%;background:var(--c);opacity:.35;transition:.3s}
+.sw.on{color:var(--ink)}
+.sw.on span{opacity:1;box-shadow:0 0 0 3px rgba(255,255,255,.08),0 0 12px var(--c);transform:scale(1.25)}
+
+#gate{inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:20px;
+  background:rgba(5,6,10,.55);backdrop-filter:blur(3px);text-align:center;transition:opacity .5s}
+#gate.hide{opacity:0;pointer-events:none}
+#gate p{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;font-style:italic;font-size:20px;color:var(--dim)}
+#start{padding:13px 30px;border-radius:999px;border:1px solid rgba(233,230,223,.4);background:transparent;
+  color:var(--ink);font:inherit;font-size:12px;letter-spacing:.18em;text-transform:uppercase;cursor:pointer;transition:.25s}
+#start:hover:not(:disabled){background:rgba(233,230,223,.1)}
+#start:disabled{opacity:.5;cursor:default}
+#err{font-size:12px;color:#f08a8a;max-width:420px;min-height:1em;line-height:1.5}
+
+@media(max-width:700px){#legend{display:none}h1{font-size:28px}}
+</style>
+</head>
+<body>
+
+<video id="cam" playsinline muted></video>
+<canvas id="stage"></canvas>
+
+<div id="title" class="ui">
+  <h1>Orbis</h1>
+  <div id="status"><span id="dot"></span><span id="statusText">Camera off</span></div>
+</div>
+
+<button id="toggle" class="ui" disabled aria-pressed="false"><span>Camera background</span><i></i></button>
+
+<div id="legend" class="ui">
+  <div><b>One hand</b> &nbsp;move &amp; rotate</div>
+  <div><b>Pinch &amp; hold</b> &nbsp;charge &nbsp;→&nbsp; release to burst</div>
+  <div><b>Two hands</b> &nbsp;spread to grow, close to shrink</div>
+  <div><b>Fingers 0–5</b> &nbsp;colour</div>
+</div>
+
+<div id="swatches" class="ui"></div>
+
+<div id="gate" class="ui">
+  <p>Raise a hand.</p>
+  <button id="start">Enable camera</button>
+  <div id="err"></div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ---------- config ---------- */
+const N = 3000;
+const D = 3.2;                       // perspective distance (in sphere radii)
+const CHARGE_TIME = 1.1;             // seconds to fill the ring
+const PALETTE = [                    // index = fingers raised
+  [236,236,242],  // 0 fist  – white
+  [90,205,255],   // 1       – cyan
+  [100,240,170],  // 2       – mint
+  [255,200,90],   // 3       – amber
+  [255,110,170],  // 4       – pink
+  [170,135,255]   // 5       – violet
+];
+const CONN = [[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+
+/* ---------- dom ---------- */
+const canvas = document.getElementById('stage');
+const ctx = canvas.getContext('2d');
+const video = document.getElementById('cam');
+const toggle = document.getElementById('toggle');
+const gate = document.getElementById('gate');
+const startBtn = document.getElementById('start');
+const errEl = document.getElementById('err');
+const dot = document.getElementById('dot');
+const statusText = document.getElementById('statusText');
+const swWrap = document.getElementById('swatches');
+
+PALETTE.forEach((c, i) => {
+  const d = document.createElement('div');
+  d.className = 'sw';
+  d.style.setProperty('--c', `rgb(${c})`);
+  d.innerHTML = `<span></span>${i}`;
+  swWrap.appendChild(d);
+});
+const swEls = [...swWrap.children];
+
+/* ---------- state ---------- */
+let W = 0, H = 0, dpr = 1;
+const S = { cx:0, cy:0, tcx:0, tcy:0, R:0, tR:0, rotX:.35, rotY:0, wX:0, wY:.3 };
+let baseR = 200;
+
+const ux = new Float32Array(N), uy = new Float32Array(N), uz = new Float32Array(N);
+const px = new Float32Array(N), py = new Float32Array(N), pz = new Float32Array(N);
+const vx = new Float32Array(N), vy = new Float32Array(N);
+const ph = new Float32Array(N), rf = new Float32Array(N);
+
+// Fibonacci sphere
+const GA = Math.PI * (3 - Math.sqrt(5));
+for (let i = 0; i < N; i++) {
+  const y = 1 - 2 * (i + .5) / N, r = Math.sqrt(1 - y * y), a = i * GA;
+  ux[i] = Math.cos(a) * r; uy[i] = y; uz[i] = Math.sin(a) * r;
+  ph[i] = Math.random(); rf[i] = .75 + Math.random() * .5;
+}
+
+let phase = 'normal', phaseT = 0;
+let charge = 0, pinching = false;
+let hands = [], lastSeen = -1e9, noHand = 0;
+let twoHand = false, d0 = 1, R0 = 1;
+let fingerCount = 1, cand = 1, stable = 0;
+let camReady = false;
+let shock = null;
+const col = PALETTE[1].slice();
+let colDrawn = [-1,-1,-1];
+
+/* ---------- sprite ---------- */
+const spr = document.createElement('canvas');
+spr.width = spr.height = 64;
+const sctx = spr.getContext('2d');
+function makeSprite(r, g, b) {
+  sctx.clearRect(0, 0, 64, 64);
+  const gr = sctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  const m = v => Math.round(v + (255 - v) * .5);
+  gr.addColorStop(0, `rgba(${m(r)},${m(g)},${m(b)},1)`);
+  gr.addColorStop(.22, `rgba(${r},${g},${b},.9)`);
+  gr.addColorStop(.6, `rgba(${r},${g},${b},.16)`);
+  gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+  sctx.fillStyle = gr;
+  sctx.fillRect(0, 0, 64, 64);
+}
+
+/* ---------- resize ---------- */
+function resize() {
+  const oW = W, oH = H;
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  baseR = Math.min(W, H) * .22;
+  if (!oW) {
+    S.cx = S.tcx = W / 2; S.cy = S.tcy = H / 2; S.R = S.tR = baseR;
+    for (let i = 0; i < N; i++) { px[i] = W / 2; py[i] = H / 2; }
+  } else {
+    const kx = W / oW, ky = H / oH, ks = Math.min(kx, ky);
+    S.cx *= kx; S.tcx *= kx; S.cy *= ky; S.tcy *= ky; S.R *= ks; S.tR *= ks;
+    for (let i = 0; i < N; i++) { px[i] *= kx; py[i] *= ky; }
+  }
+}
+addEventListener('resize', resize);
+resize();
+
+/* ---------- hand processing ---------- */
+function mapPt(lm) {
+  const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+  const s = Math.max(W / vw, H / vh), dw = vw * s, dh = vh * s;
+  return { x: (1 - lm.x) * dw + (W - dw) / 2, y: lm.y * dh + (H - dh) / 2 };
+}
+
+function processHand(l) {
+  const p = l.map(mapPt);
+  const d = (a, b) => Math.hypot(p[a].x - p[b].x, p[a].y - p[b].y);
+  const size = d(0, 9) || 1;
+  let n = 0;
+  for (const [t, k] of [[8,6],[12,10],[16,14],[20,18]]) if (d(t, 0) > d(k, 0) * 1.1) n++;
+  if (d(4, 17) > d(2, 17) * 1.15) n++;
+  const c = {
+    x: (p[0].x + p[5].x + p[9].x + p[13].x + p[17].x) / 5,
+    y: (p[0].y + p[5].y + p[9].y + p[13].y + p[17].y) / 5
+  };
+  return { p, c, size, n, pr: d(4, 8) / size };
+}
+
+function onResults(res) {
+  const lms = res.multiHandLandmarks || [];
+  if (!lms.length) return;
+  lastSeen = performance.now();
+  hands = lms.slice(0, 2).map(processHand);
+
+  // finger count -> colour (single hand, not pinching), debounced
+  if (hands.length === 1 && hands[0].pr > .5) {
+    const n = hands[0].n;
+    if (n === cand) stable++; else { cand = n; stable = 0; }
+    if (stable >= 5) fingerCount = cand;
+  }
+}
+
+/* ---------- camera + mediapipe ---------- */
+async function startCamera() {
+  errEl.textContent = '';
+  startBtn.disabled = true;
+  try {
+    if (typeof Hands === 'undefined') throw new Error('MediaPipe failed to load. Check your internet connection.');
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      throw new Error('Camera API unavailable. Open this file via https:// or http://localhost.');
+    setStatus('Starting camera…');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+    setStatus('Loading hand model…');
+    const hs = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+    hs.setOptions({ maxNumHands: 2, modelComplexity: 1, minDetectionConfidence: .6, minTrackingConfidence: .5 });
+    hs.onResults(onResults);
+    await hs.initialize();
+    camReady = true;
+    toggle.disabled = false;
+    gate.classList.add('hide');
+    detectLoop(hs);
+  } catch (e) {
+    errEl.textContent = e.message || String(e);
+    startBtn.disabled = false;
+    setStatus('Camera off');
+  }
+}
+
+let lastVT = -1;
+async function detectLoop(hs) {
+  if (video.readyState >= 2 && video.currentTime !== lastVT) {
+    lastVT = video.currentTime;
+    try { await hs.send({ image: video }); } catch (e) {}
+  }
+  requestAnimationFrame(() => detectLoop(hs));
+}
+
+startBtn.addEventListener('click', startCamera);
+toggle.addEventListener('click', () => {
+  const on = video.classList.toggle('on');
+  toggle.classList.toggle('active', on);
+  toggle.setAttribute('aria-pressed', on);
+});
+
+/* ---------- ui helpers ---------- */
+let lastStatus = '';
+function setStatus(s, live) {
+  if (s !== lastStatus) { statusText.textContent = s; lastStatus = s; }
+  dot.classList.toggle('live', !!live);
+}
+let lastSw = -1;
+function setSwatch(n) {
+  if (n === lastSw) return;
+  swEls.forEach((e, i) => e.classList.toggle('on', i === n));
+  lastSw = n;
+}
+
+/* ---------- actions ---------- */
+function explode(str) {
+  phase = 'explode'; phaseT = 0;
+  const M = Math.max(W, H);
+  for (let i = 0; i < N; i++) {
+    let dx = px[i] - S.cx, dy = py[i] - S.cy;
+    const l = Math.hypot(dx, dy) || 1; dx /= l; dy /= l;
+    const a = (Math.random() - .5) * 1.7, ca = Math.cos(a), sa = Math.sin(a);
+    const sp = (.25 + Math.random() * .95) * M * 1.5 * str;
+    vx[i] = (dx * ca - dy * sa) * sp;
+    vy[i] = (dx * sa + dy * ca) * sp;
+  }
+  shock = { x: S.cx, y: S.cy, t: 0, s: str };
+  charge = 0;
+}
+
+function updatePinch(active) {
+  if (active.length === 1 && phase === 'normal') {
+    const pr = active[0].pr;
+    if (!pinching && pr < .26) pinching = true;
+    else if (pinching && pr > .4) {
+      pinching = false;
+      if (charge > .25) explode(.35 + .65 * charge);
+    }
+  } else if (pinching) {
+    pinching = false;                      // hand count changed / lost -> cancel
+  }
+}
+
+/* ---------- draw helpers ---------- */
+function drawRing(cx, cy, r, p, full, t) {
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = 'rgba(255,255,255,.12)';
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, 6.2832); ctx.stroke();
+  const c = `rgb(${col.map(Math.round)})`;
+  ctx.strokeStyle = c; ctx.shadowColor = c;
+  ctx.shadowBlur = full ? 26 + 10 * Math.sin(t * 14) : 16;
+  ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + p * 6.2832); ctx.stroke();
+  if (full) {
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = 'rgba(233,230,223,.85)';
+    ctx.font = 'italic 15px "Iowan Old Style",Georgia,serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('release', cx, cy + r + 28);
+  }
+  ctx.restore();
+}
+
+/* ---------- main loop ---------- */
+let last = performance.now(), t = 0;
+function frame(now) {
+  const dt = Math.min(.05, Math.max(.001, (now - last) / 1000));
+  last = now; t += dt;
+
+  const active = (now - lastSeen < 250) ? hands : [];
+  const one = active.length === 1, two = active.length === 2;
+  if (active.length) noHand = 0; else noHand += dt;
+
+  /* targets */
+  if (two) {
+    const [a, b] = active;
+    const dist = Math.hypot(a.c.x - b.c.x, a.c.y - b.c.y);
+    if (!twoHand) { twoHand = true; d0 = Math.max(dist, 60); R0 = S.tR; }
+    const minR = Math.min(W, H) * .06, maxR = Math.min(W, H) * .62;
+    S.tR = Math.max(minR, Math.min(maxR, R0 * dist / d0));
+    S.tcx = (a.c.x + b.c.x) / 2; S.tcy = (a.c.y + b.c.y) / 2;
+  } else {
+    twoHand = false;
+    if (one) { S.tcx = active[0].c.x; S.tcy = active[0].c.y; }
+    else if (noHand > 3) {
+      const k = 1 - Math.exp(-.8 * dt);
+      S.tcx += (W / 2 - S.tcx) * k; S.tcy += (H / 2 - S.tcy) * k;
+    }
+  }
+  S.tcx = Math.max(0, Math.min(W, S.tcx)); S.tcy = Math.max(0, Math.min(H, S.tcy));
+
+  updatePinch(active);
+  if (pinching) charge = Math.min(1, charge + dt / CHARGE_TIME);
+  else charge = Math.max(0, charge - dt * 3);
+
+  /* smooth move */
+  const pcx = S.cx, pcy = S.cy;
+  const k = 1 - Math.exp(-10 * dt);
+  S.cx += (S.tcx - S.cx) * k; S.cy += (S.tcy - S.cy) * k;
+  S.R += (S.tR - S.R) * (1 - Math.exp(-9 * dt));
+
+  /* rotation: roll like a ball under the hand + idle spin */
+  const r = Math.max(S.R, 40);
+  let tY = .3, tX = 0;
+  if (active.length) {
+    tY += (S.cx - pcx) / r * 1.7 / dt;
+    tX += -(S.cy - pcy) / r * 1.7 / dt;
+  }
+  tY += charge * 4;
+  tY = Math.max(-9, Math.min(9, tY)); tX = Math.max(-9, Math.min(9, tX));
+  const rk = 1 - Math.exp(-6 * dt);
+  S.wY += (tY - S.wY) * rk; S.wX += (tX - S.wX) * rk;
+  S.rotY += S.wY * dt; S.rotX += S.wX * dt;
+
+  /* phase machine */
+  let follow = 14, drag = 14, bounce = false, glow = 1;
+  if (phase === 'explode') {
+    phaseT += dt; follow = 0; drag = 1.7; bounce = true; glow = 1.35;
+    if (phaseT > 1.1) { phase = 'reform'; phaseT = 0; }
+  } else if (phase === 'reform') {
+    phaseT += dt;
+    const q = Math.min(1, phaseT / 1.7);
+    follow = 10 * q * q * (3 - 2 * q); drag = 4; bounce = q < .6; glow = 1.15;
+    if (phaseT > 2.0) phase = 'normal';
+  }
+  const dragF = Math.exp(-drag * dt);
+
+  /* colour */
+  const tc = PALETTE[fingerCount];
+  const ck = 1 - Math.exp(-6 * dt);
+  for (let i = 0; i < 3; i++) col[i] += (tc[i] - col[i]) * ck;
+  const cr = Math.round(col[0]), cg = Math.round(col[1]), cb = Math.round(col[2]);
+  if (cr !== colDrawn[0] || cg !== colDrawn[1] || cb !== colDrawn[2]) {
+    makeSprite(cr, cg, cb); colDrawn = [cr, cg, cb];
+  }
+
+  /* particles */
+  ctx.clearRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'lighter';
+  const cyR = Math.cos(S.rotY), syR = Math.sin(S.rotY), cxR = Math.cos(S.rotX), sxR = Math.sin(S.rotX);
+  const base = S.R * (1 - .16 * charge);
+  const sizeK = Math.max(.6, Math.min(1.8, S.R / 200));
+  for (let i = 0; i < N; i++) {
+    const x = ux[i], y = uy[i], z = uz[i];
+    const x1 = x * cyR + z * syR, z1 = -x * syR + z * cyR;
+    const y2 = y * cxR - z1 * sxR, z2 = y * sxR + z1 * cxR;
+    const rr = base * (1 + .012 * Math.sin(t * 1.4 + ph[i] * 6.283) + charge * .035 * Math.sin(t * 38 + ph[i] * 50));
+    const f = D / (D - z2);
+    const tx = S.cx + x1 * rr * f, ty = S.cy + y2 * rr * f;
+
+    vx[i] *= dragF; vy[i] *= dragF;
+    let nx = px[i] + vx[i] * dt, ny = py[i] + vy[i] * dt;
+    const fl = 1 - Math.exp(-follow * rf[i] * dt);
+    nx += (tx - nx) * fl; ny += (ty - ny) * fl; pz[i] += (z2 - pz[i]) * fl;
+
+    if (bounce) {
+      if (nx < 0) { nx = 0; vx[i] = Math.abs(vx[i]) * .6; } else if (nx > W) { nx = W; vx[i] = -Math.abs(vx[i]) * .6; }
+      if (ny < 0) { ny = 0; vy[i] = Math.abs(vy[i]) * .6; } else if (ny > H) { ny = H; vy[i] = -Math.abs(vy[i]) * .6; }
+    }
+    px[i] = nx; py[i] = ny;
+
+    const zn = (Math.max(-1, Math.min(1, pz[i])) + 1) * .5;
+    const s = (2.2 + 2.8 * zn) * sizeK;
+    ctx.globalAlpha = Math.min(1, (.12 + .62 * zn * zn) * (1 + .7 * charge) * glow);
+    ctx.drawImage(spr, nx - s, ny - s, s * 2, s * 2);
+  }
+
+  /* overlays */
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+
+  if (shock) {
+    shock.t += dt;
+    const q = shock.t / .8;
+    if (q >= 1) shock = null;
+    else {
+      ctx.strokeStyle = `rgba(${cr},${cg},${cb},${(1 - q) * .5})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(shock.x, shock.y, S.R + q * Math.max(W, H) * .5 * (.5 + shock.s * .5), 0, 6.2832);
+      ctx.stroke();
+    }
+  }
+
+  if (charge > .01 && phase === 'normal') {
+    drawRing(S.cx, S.cy, S.R * 1.3 + 18, charge, charge >= 1, t);
+  }
+
+  for (const h of active) {
+    ctx.strokeStyle = 'rgba(255,255,255,.15)'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (const [a, b] of CONN) { ctx.moveTo(h.p[a].x, h.p[a].y); ctx.lineTo(h.p[b].x, h.p[b].y); }
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    for (const i of [4, 8, 12, 16, 20]) { ctx.beginPath(); ctx.arc(h.p[i].x, h.p[i].y, 2.5, 0, 6.2832); ctx.fill(); }
+    if (active.length === 1 && h.pr < .6) {
+      const mx = (h.p[4].x + h.p[8].x) / 2, my = (h.p[4].y + h.p[8].y) / 2;
+      ctx.strokeStyle = `rgba(${cr},${cg},${cb},.8)`; ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(mx, my, 6 + h.pr * 18, 0, 6.2832); ctx.stroke();
+    }
+  }
+
+  /* status */
+  setSwatch(fingerCount);
+  if (!camReady) { /* keep gate/loading text */ }
+  else if (phase === 'explode') setStatus('Burst', true);
+  else if (phase === 'reform') setStatus('Reforming', true);
+  else if (pinching) setStatus(charge >= 1 ? 'Release to burst' : `Charging ${Math.round(charge * 100)}%`, true);
+  else if (two) setStatus(`Two hands · size ${Math.round(S.tR / baseR * 100)}%`, true);
+  else if (one) setStatus(`One hand · ${fingerCount} finger${fingerCount === 1 ? '' : 's'}`, true);
+  else setStatus('Show a hand', false);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
